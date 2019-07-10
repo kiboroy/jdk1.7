@@ -484,11 +484,18 @@ public class HashMap<K,V>
      *         previously associated <tt>null</tt> with <tt>key</tt>.)
      */
     public V put(K key, V value) {
+        // 如果entry数组为空，初始化数组
         if (table == EMPTY_TABLE) {
+            // 根据new hashmap的capacity取确定的threshold,
+            // 会向上取2的幂，来初始化entry数组
             inflateTable(threshold);
         }
+        // 如果过key为null，value值放在了table[0]，
+        // null key也不会存储了
         if (key == null)
             return putForNullKey(value);
+
+        // 如果不为null
         int hash = hash(key);
         int i = indexFor(hash, table.length);
         for (Entry<K,V> e = table[i]; e != null; e = e.next) {
