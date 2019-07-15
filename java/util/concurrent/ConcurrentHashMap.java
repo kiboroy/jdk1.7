@@ -429,13 +429,16 @@ public class ConcurrentHashMap<K, V> extends AbstractMap<K, V>
         }
 
         final V put(K key, int hash, V value, boolean onlyIfAbsent) {
+            // 写入segment前尝试获取独占锁，
             HashEntry<K,V> node = tryLock() ? null :
                 scanAndLockForPut(key, hash, value);
             V oldValue;
             try {
                 HashEntry<K,V>[] tab = table;
                 int index = (tab.length - 1) & hash;
+                // 根据hash值计算index的位置，获取到对应index的元素
                 HashEntry<K,V> first = entryAt(tab, index);
+                // 循环对应位置的元素，与hashmap循环put值一致
                 for (HashEntry<K,V> e = first;;) {
                     if (e != null) {
                         K k;
@@ -451,11 +454,13 @@ public class ConcurrentHashMap<K, V> extends AbstractMap<K, V>
                         e = e.next;
                     }
                     else {
+                        // 头插法
                         if (node != null)
                             node.setNext(first);
                         else
                             node = new HashEntry<K,V>(hash, key, value, first);
                         int c = count + 1;
+                        // table长度大于扩容阈值就rehash
                         if (c > threshold && tab.length < MAXIMUM_CAPACITY)
                             rehash(node);
                         else
@@ -712,21 +717,6 @@ public class ConcurrentHashMap<K, V> extends AbstractMap<K, V>
     // Accessing segments
 
     /**
-     * Gets the jth element of given segment array (if nonnull) with
-     * volatile element access semantics via Unsafe. (The null check
-     * can trigger harmlessly only during deserialization.) Note:
-     * because each element of segments array is set only once (using
-     * fully ordered writes), some performance-sensitive methods rely
-     * on this method only as a recheck upon null reads.
-     */
-    @SuppressWarnings("unchecked")
-    static final <K,V> Segment<K,V> segmentAt(Segment<K,V>[] ss, int j) {
-        long u = (j << SSHIFT) + SBASE;
-        return ss == null ? null :
-            (Segment<K,V>) UNSAFE.getObjectVolatile(ss, u);
-    }
-
-    /**
      * Returns the segment for the given index, creating it and
      * recording in segment table (via CAS) if not already present.
      *
@@ -740,21 +730,40 @@ public class ConcurrentHashMap<K, V> extends AbstractMap<K, V>
         Segment<K,V> seg;
         if ((seg = (Segment<K,V>)UNSAFE.getObjectVolatile(ss, u)) == null) {
             Segment<K,V> proto = ss[0]; // use segment 0 as prototype
+            // 使用当前segment[0]的长度和负载因子来初始化segment[k]
             int cap = proto.table.length;
             float lf = proto.loadFactor;
             int threshold = (int)(cap * lf);
+            // 初始化segment[k]的内部数组
             HashEntry<K,V>[] tab = (HashEntry<K,V>[])new HashEntry[cap];
+            // 再次检查segment[k]这个位置是否已被初始化
             if ((seg = (Segment<K,V>)UNSAFE.getObjectVolatile(ss, u))
-                == null) { // recheck
+                    == null) { // recheck
                 Segment<K,V> s = new Segment<K,V>(lf, threshold, tab);
+                // while循环，cas自旋，保证当前线程设置值成功就break
                 while ((seg = (Segment<K,V>)UNSAFE.getObjectVolatile(ss, u))
-                       == null) {
+                        == null) {
                     if (UNSAFE.compareAndSwapObject(ss, u, null, seg = s))
                         break;
                 }
             }
         }
         return seg;
+    }
+
+    /**
+     * Gets the jth element of given segment array (if nonnull) with
+     * volatile element access semantics via Unsafe. (The null check
+     * can trigger harmlessly only during deserialization.) Note:
+     * because each element of segments array is set only once (using
+     * fully ordered writes), some performance-sensitive methods rely
+     * on this method only as a recheck upon null reads.
+     */
+    @SuppressWarnings("unchecked")
+    static final <K,V> Segment<K,V> segmentAt(Segment<K,V>[] ss, int j) {
+        long u = (j << SSHIFT) + SBASE;
+        return ss == null ? null :
+            (Segment<K,V>) UNSAFE.getObjectVolatile(ss, u);
     }
 
     // Hash-based segment and entry accesses
@@ -800,27 +809,39 @@ public class ConcurrentHashMap<K, V> extends AbstractMap<K, V>
     @SuppressWarnings("unchecked")
     public ConcurrentHashMap(int initialCapacity,
                              float loadFactor, int concurrencyLevel) {
+        // 负载因子小于等于零 或者 初始容量小于零  或者 并发级别小于等于零  抛出非法参数异常
         if (!(loadFactor > 0) || initialCapacity < 0 || concurrencyLevel <= 0)
             throw new IllegalArgumentException();
+        // 并发级别如果大于2^16，那么赋值为2^16，并发级别是一个小于2^24的2的幂
         if (concurrencyLevel > MAX_SEGMENTS)
             concurrencyLevel = MAX_SEGMENTS;
         // Find power-of-two sizes best matching arguments
         int sshift = 0;
         int ssize = 1;
+
+        // 如果segment数组长度小于并发级别，sshift+1，ssize乘以2，
+        // 保证数组长度是2的幂
         while (ssize < concurrencyLevel) {
             ++sshift;
             ssize <<= 1;
         }
+        // 姑且称下面两个变量为 移位数和 掩码
         this.segmentShift = 32 - sshift;
         this.segmentMask = ssize - 1;
+        // 如果最大容量超过2^30，就赋值为2^30
         if (initialCapacity > MAXIMUM_CAPACITY)
             initialCapacity = MAXIMUM_CAPACITY;
+        // 这里计算每个segment数组中可以分到的大小
+        //
         int c = initialCapacity / ssize;
         if (c * ssize < initialCapacity)
             ++c;
+        // 初始化为2，对于具体的segment上，
+        // 插入一个元素不至于扩容，插入第二个元素才扩容
         int cap = MIN_SEGMENT_TABLE_CAPACITY;
         while (cap < c)
             cap <<= 1;
+        // 初始化segment数组和segment[0]
         // create segments and segments[0]
         Segment<K,V> s0 =
             new Segment<K,V>(loadFactor, (int)(cap * loadFactor),
@@ -1120,13 +1141,21 @@ public class ConcurrentHashMap<K, V> extends AbstractMap<K, V>
     @SuppressWarnings("unchecked")
     public V put(K key, V value) {
         Segment<K,V> s;
+        // value不能为null
         if (value == null)
             throw new NullPointerException();
         int hash = hash(key);
+        // 根据hash值找segment的位置
+        //
         int j = (hash >>> segmentShift) & segmentMask;
+        // 返回对应位置的segment
+        // new concurrentHashmap时只对第一个元素进行了初始化
+        // 其他位置的segment都是在put第一个值的时候初始化
+        // ensureSegment内部用CAS保证，有一个线程初始化成功就算成功
         if ((s = (Segment<K,V>)UNSAFE.getObject          // nonvolatile; recheck
              (segments, (j << SSHIFT) + SBASE)) == null) //  in ensureSegment
             s = ensureSegment(j);
+        // 对应位置的segment其实是一个继承了Reentrantlock的hashmap
         return s.put(key, hash, value, false);
     }
 
